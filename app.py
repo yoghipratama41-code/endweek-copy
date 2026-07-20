@@ -25,7 +25,7 @@ ENDWEEK_TEMPLATE_ID = "1PvaGfcS1dBMcW-48HQWLEXT3irKPFi9Ptm5eqloX9QA"
 
 # FITUR TAMBAHAN: Konfigurasi Spreadsheet
 TARGET_SPREADSHEET_ID = "1D0CnYZwZtx75OXJGvHeJCiMe6t-pt0UhTOm7vYhbGLQ"
-TARGET_SHEET_RANGE = "Sheet1!A:C"
+TARGET_SHEET_RANGE = "Extract!A:C"
 
 # FITUR TAMBAHAN: Menambah scope untuk spreadsheets
 SCOPES = (
