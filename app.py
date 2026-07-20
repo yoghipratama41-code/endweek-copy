@@ -23,10 +23,16 @@ GOOGLE_REFRESH_TOKEN = st.secrets["GOOGLE_REFRESH_TOKEN"]
 # ID Template Endweek yang baru saja Anda berikan
 ENDWEEK_TEMPLATE_ID = "1PvaGfcS1dBMcW-48HQWLEXT3irKPFi9Ptm5eqloX9QA"
 
+# FITUR TAMBAHAN: Konfigurasi Spreadsheet
+TARGET_SPREADSHEET_ID = "1D0CnYZwZtx75OXJGvHeJCiMe6t-pt0UhTOm7vYhbGLQ"
+TARGET_SHEET_RANGE = "Sheet1!A:C"
+
+# FITUR TAMBAHAN: Menambah scope untuk spreadsheets
 SCOPES = (
     "https://www.googleapis.com/auth/drive.file "
     "https://www.googleapis.com/auth/drive.readonly "
-    "https://www.googleapis.com/auth/presentations"
+    "https://www.googleapis.com/auth/presentations "
+    "https://www.googleapis.com/auth/spreadsheets"
 )
 
 TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
@@ -106,10 +112,6 @@ def cari_template_slide(presentation):
     return id_main, id_comment
 
 def cari_template_slide_endweek(presentation):
-    """
-    Mendeteksi slide format 1 (Facebook Group) dan format 2 (Promotion)
-    berdasarkan teks yang ada di dalamnya.
-    """
     id_fb_main, id_fb_comment, id_promo_main = None, None, None
     for slide in presentation.get("slides", []):
         txt = _get_slide_text(slide).lower()
@@ -123,6 +125,7 @@ def cari_template_slide_endweek(presentation):
 
 
 # ============== HELPER: UPLOAD IMAGE KE DRIVE ==============
+# (DIKEMBALIKAN KE KODE ASLI)
 def upload_gambar_ke_drive(drive_service, uploaded_file):
     uploaded_file.seek(0)
     media = MediaIoBaseUpload(io.BytesIO(uploaded_file.read()), mimetype="image/jpeg")
@@ -136,9 +139,12 @@ def upload_gambar_ke_drive(drive_service, uploaded_file):
 
 
 # ============== AUTOMATION 1: MIDWEEK (AI GENERATION) ==============
-def jalankan_otomatisasi_midweek(creds, news_items, progress_bar, status_box):
+# FITUR TAMBAHAN: parameter week_range
+def jalankan_otomatisasi_midweek(creds, news_items, week_range, progress_bar, status_box):
     drive_service = build("drive", "v3", credentials=creds)
     slides_service = build("slides", "v1", credentials=creds)
+    # FITUR TAMBAHAN: build service untuk sheets
+    sheets_service = build("sheets", "v4", credentials=creds) 
     genai.configure(api_key=GEMINI_API_KEY)
 
     model_fallback_list = get_model_fallback_list()
@@ -156,8 +162,10 @@ def jalankan_otomatisasi_midweek(creds, news_items, progress_bar, status_box):
     slide_count = len(presentation.get("slides", []))
     jumlah = len(news_items)
     
-    # Simpan hasil olahan AI untuk dipakai lagi di Endweek
     processed_data = [] 
+    
+    # FITUR TAMBAHAN: List untuk menyimpan data untuk spreadsheet
+    sheets_append_data = []
 
     for index, item in enumerate(news_items):
         main_file = item["main"]
@@ -191,7 +199,6 @@ def jalankan_otomatisasi_midweek(creds, news_items, progress_bar, status_box):
             full_para = teks_raw.split("[CONTENT]")[1].strip()
             sentences = re.split(r"(?<=[.!?]) +", full_para)
 
-            # Ekstrak context dan list insight
             if len(sentences) > 1:
                 konteks = sentences[0]
                 insight_list = [s for s in sentences[1:] if s.strip()]
@@ -201,10 +208,12 @@ def jalankan_otomatisasi_midweek(creds, news_items, progress_bar, status_box):
                 insight_list = []
                 insight_midweek = "-"
 
+            # FITUR TAMBAHAN: Extract untuk spreadsheet (WeekRange, Title, Body)
+            sheets_append_data.append([week_range, judul, konteks])
+
             link_gambar_main = upload_gambar_ke_drive(drive_service, main_file)
             link_gambar_comment = upload_gambar_ke_drive(drive_service, comment_file) if comment_file else None
 
-            # Simpan data ke list
             processed_data.append({
                 "filename": main_file.name,
                 "title": judul,
@@ -214,7 +223,6 @@ def jalankan_otomatisasi_midweek(creds, news_items, progress_bar, status_box):
                 "img_cmt": link_gambar_comment
             })
 
-            # --- BUAT SLIDE MIDWEEK MAIN ---
             res_dup = slides_service.presentations().batchUpdate(
                 presentationId=id_slide_baru,
                 body={"requests": [{"duplicateObject": {"objectId": id_templat_main}}]},
@@ -231,7 +239,6 @@ def jalankan_otomatisasi_midweek(creds, news_items, progress_bar, status_box):
             slides_service.presentations().batchUpdate(presentationId=id_slide_baru, body={"requests": req_main}).execute()
             slide_count += 1
 
-            # --- BUAT SLIDE MIDWEEK COMMENT ---
             if comment_file:
                 res_dup_c = slides_service.presentations().batchUpdate(
                     presentationId=id_slide_baru,
@@ -255,6 +262,21 @@ def jalankan_otomatisasi_midweek(creds, news_items, progress_bar, status_box):
 
         finally:
             progress_bar.progress((index + 1) / jumlah)
+
+    # FITUR TAMBAHAN: Kirim data ke Spreadsheet sekaligus di akhir proses
+    if sheets_append_data:
+        try:
+            status_box.info("Mengirim data (Title & Kalimat Pertama) ke Spreadsheet...")
+            body = {"values": sheets_append_data}
+            sheets_service.spreadsheets().values().append(
+                spreadsheetId=TARGET_SPREADSHEET_ID,
+                range=TARGET_SHEET_RANGE,
+                valueInputOption="USER_ENTERED",
+                body=body
+            ).execute()
+            status_box.success("✅ Data berhasil ditambahkan ke Spreadsheet!")
+        except Exception as sheet_err:
+            status_box.error(f"⚠️ Slide sukses dibuat, namun gagal menambahkan ke Spreadsheet: {sheet_err}")
 
     return link_presentasi, processed_data
 
@@ -290,11 +312,9 @@ def jalankan_otomatisasi_endweek(creds, processed_data, selections, status_box):
         img_main = item["img_main"]
         img_cmt = item["img_cmt"]
         
-        # PERUBAHAN ENDWEEK: Insight disatukan dengan spasi menjadi paragraf
         insight_endweek = " ".join(item["insight_list"])
 
         if "Format 1" in format_pilihan:
-            # COPY SLIDE FB GROUP MAIN
             res_dup = slides_service.presentations().batchUpdate(
                 presentationId=id_slide_baru, body={"requests": [{"duplicateObject": {"objectId": id_fb_main}}]}
             ).execute()
@@ -310,7 +330,6 @@ def jalankan_otomatisasi_endweek(creds, processed_data, selections, status_box):
             slides_service.presentations().batchUpdate(presentationId=id_slide_baru, body={"requests": req_main}).execute()
             slide_count += 1
 
-            # COPY SLIDE FB GROUP COMMENT (Kalau Ada)
             if img_cmt and id_fb_comment:
                 res_dup_c = slides_service.presentations().batchUpdate(
                     presentationId=id_slide_baru, body={"requests": [{"duplicateObject": {"objectId": id_fb_comment}}]}
@@ -326,7 +345,6 @@ def jalankan_otomatisasi_endweek(creds, processed_data, selections, status_box):
                 slide_count += 1
 
         else:
-            # COPY SLIDE PROMOTION
             res_dup = slides_service.presentations().batchUpdate(
                 presentationId=id_slide_baru, body={"requests": [{"duplicateObject": {"objectId": id_promo_main}}]}
             ).execute()
@@ -370,7 +388,6 @@ except Exception as e:
     st.error(f"Gagal autentikasi ke Google: {e}")
     st.stop()
 
-# Inisialisasi Session State
 if "midweek_done" not in st.session_state:
     st.session_state.midweek_done = False
     st.session_state.processed_data = []
@@ -379,7 +396,10 @@ if "midweek_done" not in st.session_state:
 st.divider()
 
 # ------------- TAHAP 1: UPLOAD & MIDWEEK -------------
-st.subheader("1️⃣ Upload Gambar (Untuk Midweek & Endweek)")
+st.subheader("1️⃣ Upload Gambar & Setup Data")
+# FITUR TAMBAHAN: Form input bebas untuk tanggal (sebagai teks)
+week_range_input = st.text_input("Masukkan Tanggal / Week Range (Bebas ketik):", value="")
+
 main_files = st.file_uploader("Upload gambar utama", type=["jpg", "jpeg", "png"], accept_multiple_files=True, key="main_uploader")
 comment_files = st.file_uploader("Upload gambar comment (opsional)", type=["jpg", "jpeg", "png"], accept_multiple_files=True, key="comment_uploader")
 
@@ -390,18 +410,21 @@ if main_files:
         news_items.append({"main": mf, "comment": comment_by_name.get(mf.name)})
 
 if news_items and st.button("🚀 1. Jalankan Midweek", type="primary"):
-    progress_bar = st.progress(0)
-    status_box = st.empty()
-    with st.spinner("Memproses Midweek (AI Analysis)..."):
-        try:
-            link_midweek, data_tersimpan = jalankan_otomatisasi_midweek(creds, news_items, progress_bar, status_box)
-            # Simpan hasil ke session_state
-            st.session_state.processed_data = data_tersimpan
-            st.session_state.midweek_link = link_midweek
-            st.session_state.midweek_done = True
-            st.success("🎉 Slide Midweek Selesai!")
-        except Exception as e:
-            st.error(f"Kesalahan Midweek: {e}")
+    # Memaksa user mengisi week_range dulu
+    if not week_range_input.strip():
+        st.warning("⚠️ Harap isi 'Tanggal / Week Range' terlebih dahulu sebelum menjalankan.")
+    else:
+        progress_bar = st.progress(0)
+        status_box = st.empty()
+        with st.spinner("Memproses Midweek (AI Analysis) & Ekstrak Spreadsheet..."):
+            try:
+                link_midweek, data_tersimpan = jalankan_otomatisasi_midweek(creds, news_items, week_range_input, progress_bar, status_box)
+                st.session_state.processed_data = data_tersimpan
+                st.session_state.midweek_link = link_midweek
+                st.session_state.midweek_done = True
+                st.success("🎉 Slide Midweek Selesai dan Data di Sheet Diperbarui!")
+            except Exception as e:
+                st.error(f"Kesalahan Midweek: {e}")
 
 # ------------- TAHAP 2 & 3: KATEGORI & ENDWEEK -------------
 if st.session_state.midweek_done and len(st.session_state.processed_data) > 0:
@@ -411,7 +434,6 @@ if st.session_state.midweek_done and len(st.session_state.processed_data) > 0:
     st.subheader("2️⃣ Kategori Slide untuk Endweek")
     st.info("Pilih format presentasi untuk masing-masing slide di laporan Endweek. AI tidak akan dijalankan ulang, melainkan menggunakan hasil Midweek (Insight akan digabung menjadi 1 paragraf).")
 
-    # Form untuk pemetaan format
     selections = {}
     for item in st.session_state.processed_data:
         selections[item["filename"]] = st.radio(
