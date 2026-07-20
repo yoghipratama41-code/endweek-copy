@@ -23,10 +23,16 @@ GOOGLE_REFRESH_TOKEN = st.secrets["GOOGLE_REFRESH_TOKEN"]
 # ID Template Endweek yang baru saja Anda berikan
 ENDWEEK_TEMPLATE_ID = "1PvaGfcS1dBMcW-48HQWLEXT3irKPFi9Ptm5eqloX9QA"
 
+# Konfigurasi Tambahan untuk Spreadsheet
+TARGET_SPREADSHEET_ID = "1D0CnYZwZtx75OXJGvHeJCiMe6t-pt0UhTOm7vYhbGLQ"
+TARGET_SHEET_RANGE = "Extract!A:C" # Ganti jadi "extract!A:C" jika nama sheet sudah diubah
+
+# Ditambahkan scope spreadsheets
 SCOPES = (
     "https://www.googleapis.com/auth/drive.file "
     "https://www.googleapis.com/auth/drive.readonly "
-    "https://www.googleapis.com/auth/presentations"
+    "https://www.googleapis.com/auth/presentations "
+    "https://www.googleapis.com/auth/spreadsheets"
 )
 
 TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
@@ -136,9 +142,11 @@ def upload_gambar_ke_drive(drive_service, uploaded_file):
 
 
 # ============== AUTOMATION 1: MIDWEEK (AI GENERATION) ==============
-def jalankan_otomatisasi_midweek(creds, news_items, progress_bar, status_box):
+# Ditambahkan parameter week_range
+def jalankan_otomatisasi_midweek(creds, news_items, week_range, progress_bar, status_box):
     drive_service = build("drive", "v3", credentials=creds)
     slides_service = build("slides", "v1", credentials=creds)
+    sheets_service = build("sheets", "v4", credentials=creds) # Tambahan koneksi ke Sheets API
     genai.configure(api_key=GEMINI_API_KEY)
 
     model_fallback_list = get_model_fallback_list()
@@ -158,6 +166,7 @@ def jalankan_otomatisasi_midweek(creds, news_items, progress_bar, status_box):
     
     # Simpan hasil olahan AI untuk dipakai lagi di Endweek
     processed_data = [] 
+    sheets_append_data = [] # List untuk menyimpan data untuk spreadsheet
 
     for index, item in enumerate(news_items):
         main_file = item["main"]
@@ -200,6 +209,10 @@ def jalankan_otomatisasi_midweek(creds, news_items, progress_bar, status_box):
                 konteks = full_para
                 insight_list = []
                 insight_midweek = "-"
+
+            # --- EXTRACT UNTUK SPREADSHEET ---
+            # konteks adalah kalimat pertama, judul adalah title, week_range adalah inputan user
+            sheets_append_data.append([week_range, judul, konteks])
 
             link_gambar_main = upload_gambar_ke_drive(drive_service, main_file)
             link_gambar_comment = upload_gambar_ke_drive(drive_service, comment_file) if comment_file else None
@@ -255,6 +268,21 @@ def jalankan_otomatisasi_midweek(creds, news_items, progress_bar, status_box):
 
         finally:
             progress_bar.progress((index + 1) / jumlah)
+
+    # --- EKSEKUSI PENGIRIMAN DATA KE SPREADSHEET ---
+    if sheets_append_data:
+        try:
+            status_box.info("Mengirim data (Title & Kalimat Pertama) ke Spreadsheet...")
+            body = {"values": sheets_append_data}
+            sheets_service.spreadsheets().values().append(
+                spreadsheetId=TARGET_SPREADSHEET_ID,
+                range=TARGET_SHEET_RANGE,
+                valueInputOption="USER_ENTERED",
+                body=body
+            ).execute()
+            status_box.success("✅ Data berhasil di-ekstrak ke Spreadsheet!")
+        except Exception as sheet_err:
+            status_box.error(f"⚠️ Slide sukses dibuat, namun gagal menambahkan ke Spreadsheet: {sheet_err}")
 
     return link_presentasi, processed_data
 
@@ -379,7 +407,10 @@ if "midweek_done" not in st.session_state:
 st.divider()
 
 # ------------- TAHAP 1: UPLOAD & MIDWEEK -------------
-st.subheader("1️⃣ Upload Gambar (Untuk Midweek & Endweek)")
+st.subheader("1️⃣ Upload Gambar & Setup Data")
+# Tambahan form input untuk Week Range
+week_range_input = st.text_input("Masukkan Tanggal / Week Range (Contoh: 29 June – 05 July 2026):", value="")
+
 main_files = st.file_uploader("Upload gambar utama", type=["jpg", "jpeg", "png"], accept_multiple_files=True, key="main_uploader")
 comment_files = st.file_uploader("Upload gambar comment (opsional)", type=["jpg", "jpeg", "png"], accept_multiple_files=True, key="comment_uploader")
 
@@ -390,18 +421,22 @@ if main_files:
         news_items.append({"main": mf, "comment": comment_by_name.get(mf.name)})
 
 if news_items and st.button("🚀 1. Jalankan Midweek", type="primary"):
-    progress_bar = st.progress(0)
-    status_box = st.empty()
-    with st.spinner("Memproses Midweek (AI Analysis)..."):
-        try:
-            link_midweek, data_tersimpan = jalankan_otomatisasi_midweek(creds, news_items, progress_bar, status_box)
-            # Simpan hasil ke session_state
-            st.session_state.processed_data = data_tersimpan
-            st.session_state.midweek_link = link_midweek
-            st.session_state.midweek_done = True
-            st.success("🎉 Slide Midweek Selesai!")
-        except Exception as e:
-            st.error(f"Kesalahan Midweek: {e}")
+    if not week_range_input.strip():
+        st.warning("⚠️ Harap isi 'Tanggal / Week Range' terlebih dahulu sebelum menjalankan.")
+    else:
+        progress_bar = st.progress(0)
+        status_box = st.empty()
+        with st.spinner("Memproses Midweek (AI Analysis) & Mengekstrak Data..."):
+            try:
+                # Mengirimkan kredensial dan week_range
+                link_midweek, data_tersimpan = jalankan_otomatisasi_midweek(creds, news_items, week_range_input, progress_bar, status_box)
+                # Simpan hasil ke session_state
+                st.session_state.processed_data = data_tersimpan
+                st.session_state.midweek_link = link_midweek
+                st.session_state.midweek_done = True
+                st.success("🎉 Slide Midweek Selesai dan Data Telah Diperbarui!")
+            except Exception as e:
+                st.error(f"Kesalahan Midweek: {e}")
 
 # ------------- TAHAP 2 & 3: KATEGORI & ENDWEEK -------------
 if st.session_state.midweek_done and len(st.session_state.processed_data) > 0:
