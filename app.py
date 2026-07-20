@@ -20,20 +20,25 @@ GOOGLE_CLIENT_ID = st.secrets["GOOGLE_CLIENT_ID"]
 GOOGLE_CLIENT_SECRET = st.secrets["GOOGLE_CLIENT_SECRET"]
 GOOGLE_REFRESH_TOKEN = st.secrets["GOOGLE_REFRESH_TOKEN"]
 
+# Refresh token KEDUA, khusus untuk akses Sheets (dari automasi lain, client ID/secret sama)
+GOOGLE_REFRESH_TOKEN_SHEETS = st.secrets["GOOGLE_REFRESH_TOKEN_SHEETS"]
+
 # ID Template Endweek yang baru saja Anda berikan
 ENDWEEK_TEMPLATE_ID = "1PvaGfcS1dBMcW-48HQWLEXT3irKPFi9Ptm5eqloX9QA"
 
-# Konfigurasi Tambahan untuk Spreadsheet
+# Konfigurasi Tambahan untuk Spreadsheet (fitur baru: ekstrak Title & kalimat pertama)
 TARGET_SPREADSHEET_ID = "1D0CnYZwZtx75OXJGvHeJCiMe6t-pt0UhTOm7vYhbGLQ"
-TARGET_SHEET_RANGE = "Extract!A:C" # Ganti jadi "extract!A:C" jika nama sheet sudah diubah
+TARGET_SHEET_RANGE = "Extract!A:C"
 
-# Ditambahkan scope spreadsheets
+# Scope untuk automasi Drive/Slides yang sudah ada dari awal (TIDAK diubah)
 SCOPES = (
     "https://www.googleapis.com/auth/drive.file "
     "https://www.googleapis.com/auth/drive.readonly "
-    "https://www.googleapis.com/auth/presentations "
-    "https://www.googleapis.com/auth/spreadsheets"
+    "https://www.googleapis.com/auth/presentations"
 )
+
+# Scope terpisah khusus untuk Sheets, dipakai dengan GOOGLE_REFRESH_TOKEN_SHEETS
+SCOPES_SHEETS = "https://www.googleapis.com/auth/spreadsheets"
 
 TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
 
@@ -142,11 +147,11 @@ def upload_gambar_ke_drive(drive_service, uploaded_file):
 
 
 # ============== AUTOMATION 1: MIDWEEK (AI GENERATION) ==============
-# Ditambahkan parameter week_range
-def jalankan_otomatisasi_midweek(creds, news_items, week_range, progress_bar, status_box):
+# Ditambahkan parameter week_range dan creds_sheets untuk fitur extract ke spreadsheet
+def jalankan_otomatisasi_midweek(creds, creds_sheets, news_items, week_range, progress_bar, status_box):
     drive_service = build("drive", "v3", credentials=creds)
     slides_service = build("slides", "v1", credentials=creds)
-    sheets_service = build("sheets", "v4", credentials=creds) # Tambahan koneksi ke Sheets API
+    sheets_service = build("sheets", "v4", credentials=creds_sheets)  # Kredensial terpisah khusus Sheets
     genai.configure(api_key=GEMINI_API_KEY)
 
     model_fallback_list = get_model_fallback_list()
@@ -166,7 +171,7 @@ def jalankan_otomatisasi_midweek(creds, news_items, week_range, progress_bar, st
     
     # Simpan hasil olahan AI untuk dipakai lagi di Endweek
     processed_data = [] 
-    sheets_append_data = [] # List untuk menyimpan data untuk spreadsheet
+    sheets_append_data = []  # List untuk menyimpan data untuk spreadsheet
 
     for index, item in enumerate(news_items):
         main_file = item["main"]
@@ -388,12 +393,29 @@ def get_creds():
     return creds
 
 
+@st.cache_resource(ttl=1800)
+def get_creds_sheets():
+    # Kredensial terpisah untuk Sheets: client ID/secret sama, tapi refresh token
+    # & scope beda (diambil dari automasi lain yang sudah punya akses Sheets)
+    creds = Credentials(
+        token=None,
+        refresh_token=GOOGLE_REFRESH_TOKEN_SHEETS,
+        token_uri=TOKEN_ENDPOINT,
+        client_id=GOOGLE_CLIENT_ID,
+        client_secret=GOOGLE_CLIENT_SECRET,
+        scopes=SCOPES_SHEETS.split(),
+    )
+    creds.refresh(GoogleAuthRequest())
+    return creds
+
+
 # ============== UI ==============
 st.title("📊 GNS Slide Automation (Midweek & Endweek)")
 st.caption("Upload gambar → AI Generates Midweek → Pilih Kategori → Auto Generate Endweek.")
 
 try:
     creds = get_creds()
+    creds_sheets = get_creds_sheets()
 except Exception as e:
     st.error(f"Gagal autentikasi ke Google: {e}")
     st.stop()
@@ -408,7 +430,7 @@ st.divider()
 
 # ------------- TAHAP 1: UPLOAD & MIDWEEK -------------
 st.subheader("1️⃣ Upload Gambar & Setup Data")
-# Tambahan form input untuk Week Range
+# Tambahan form input untuk Week Range (fitur baru: masuk ke spreadsheet)
 week_range_input = st.text_input("Masukkan Tanggal / Week Range (Contoh: 29 June – 05 July 2026):", value="")
 
 main_files = st.file_uploader("Upload gambar utama", type=["jpg", "jpeg", "png"], accept_multiple_files=True, key="main_uploader")
@@ -428,8 +450,7 @@ if news_items and st.button("🚀 1. Jalankan Midweek", type="primary"):
         status_box = st.empty()
         with st.spinner("Memproses Midweek (AI Analysis) & Mengekstrak Data..."):
             try:
-                # Mengirimkan kredensial dan week_range
-                link_midweek, data_tersimpan = jalankan_otomatisasi_midweek(creds, news_items, week_range_input, progress_bar, status_box)
+                link_midweek, data_tersimpan = jalankan_otomatisasi_midweek(creds, creds_sheets, news_items, week_range_input, progress_bar, status_box)
                 # Simpan hasil ke session_state
                 st.session_state.processed_data = data_tersimpan
                 st.session_state.midweek_link = link_midweek
