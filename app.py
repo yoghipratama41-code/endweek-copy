@@ -183,12 +183,17 @@ def jalankan_otomatisasi_midweek(creds, news_items, week_range, progress_bar, st
             prompt_ai = """
             Analyze this image (and comments if any) for a professional research slide.
             Write the analysis in one single cohesive paragraph in English.
+
             Strict Rules:
             1. Refer to both users and drivers ONLY as "rider".
-            2. Do NOT mention any social media account names, usernames, or the image filename.
-            3. The paragraph must consist of at least 3-4 sentences.
+            2. Do NOT mention any social media usernames, account names, or the image filename.
+            3. You MAY mention the name of the gig/delivery platform (e.g. Grab, Foodpanda, Lalamove, etc.) if it is visibly shown or referenced in the image or comments. Only usernames, handles, and filenames are off-limits — platform names are allowed and encouraged when relevant.
+            4. Never begin the paragraph with a generic opener such as "This image...", "This discussion...", "The illustration...", "This conversation...", or any variant that refers to "the image" or "the illustration" itself. Do not describe the fact that you are looking at an image at all. Instead, dive straight into the substance: open with the rider's situation, the specific complaint or sentiment, the operational issue, a concrete detail, or the context of the exchange. Vary the opening construction from one slide to the next (e.g. start with a cause, a location, a time reference, a rider's action, or a direct statement of the issue) so that consecutive outputs do not read as templated or repetitive.
+            5. The paragraph must consist of at least 3-4 sentences.
+
             Output Format:
-            [TITLE] Write a short title (max 5 words).
+            [TITLE] Write a long, specific, headline-style title, roughly 12-20 words, that reads like a mini research-slide headline capturing the core theme plus a specific supporting detail (not a short generic label). For reference, match this style and length:
+            "Cross-Region Operational Challenges: Detailed Suggestion from Community Regarding Working on a Different Zone Registered"
             [CONTENT] Write the full paragraph here.
             """
 
