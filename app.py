@@ -2,6 +2,7 @@ import time
 import random
 import re
 import io
+import json
 
 import streamlit as st
 import google.generativeai as genai
@@ -10,8 +11,6 @@ from googleapiclient.http import MediaIoBaseUpload
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from PIL import Image, ImageFilter
-import cv2
-import numpy as np
 
 # ============== KONFIGURASI ==============
 st.set_page_config(page_title="GNS Slide Automation", page_icon="📊", layout="centered")
@@ -22,14 +21,10 @@ GOOGLE_CLIENT_ID = st.secrets["GOOGLE_CLIENT_ID"]
 GOOGLE_CLIENT_SECRET = st.secrets["GOOGLE_CLIENT_SECRET"]
 GOOGLE_REFRESH_TOKEN = st.secrets["GOOGLE_REFRESH_TOKEN"]
 
-# ID Template Endweek yang baru saja Anda berikan
 ENDWEEK_TEMPLATE_ID = "1PvaGfcS1dBMcW-48HQWLEXT3irKPFi9Ptm5eqloX9QA"
-
-# FITUR TAMBAHAN: Konfigurasi Spreadsheet
 TARGET_SPREADSHEET_ID = "1D0CnYZwZtx75OXJGvHeJCiMe6t-pt0UhTOm7vYhbGLQ"
 TARGET_SHEET_RANGE = "Extract!A:C"
 
-# FITUR TAMBAHAN: Menambah scope untuk spreadsheets
 SCOPES = (
     "https://www.googleapis.com/auth/drive.file "
     "https://www.googleapis.com/auth/drive.readonly "
@@ -126,49 +121,69 @@ def cari_template_slide_endweek(presentation):
     return id_fb_main, id_fb_comment, id_promo_main
 
 
-# ============== HELPER: AUTO BLUR AVATAR & NAME ==============
-def blur_avatars_and_names(pil_img: Image.Image, left_margin_frac: float = 0.12, name_width: int = 260) -> Image.Image:
+# ============== HELPER: AI REDACTION (NO OPENCV NEEDED) ==============
+def detect_pii_bounding_boxes(pil_img: Image.Image, api_key: str) -> list:
     """
-    Detects circular avatars sitting in the left margin of a comment
-    screenshot and blurs each avatar plus the username text beside it.
+    Uses Gemini to identify normalized bounding boxes [ymin, xmin, ymax, xmax] (0 to 1000)
+    for profile pictures and display names/usernames in comment threads.
+    """
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel("gemini-2.5-flash") 
+
+    prompt = """
+    Locate all profile picture avatars and user account names/handles in this screenshot.
+    Return a valid JSON array of objects, where each object represents a detected profile picture or display name.
+    
+    Use normalized bounding box coordinates on a scale of 0 to 1000:
+    [ymin, xmin, ymax, xmax]
+
+    Return ONLY a JSON list in this exact format, with no markdown code blocks or extra text:
+    [
+      {"label": "avatar", "box_2d": [ymin, xmin, ymax, xmax]},
+      {"label": "username", "box_2d": [ymin, xmin, ymax, xmax]}
+    ]
+    """
+
+    try:
+        response = model.generate_content([prompt, pil_img])
+        text_clean = response.text.replace("```json", "").replace("```", "").strip()
+        boxes = json.loads(text_clean)
+        return boxes
+    except Exception as e:
+        return []
+
+def blur_pii_with_ai(pil_img: Image.Image, api_key: str) -> Image.Image:
+    """
+    Uses AI vision to detect avatars and usernames, then blurs those exact coordinate areas using PIL.
     """
     img_rgb = pil_img.convert("RGB")
-    w, h = img_rgb.size
-    cv_img = cv2.cvtColor(np.array(img_rgb), cv2.COLOR_RGB2BGR)
-    gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
-    gray = cv2.medianBlur(gray, 5)
-
-    # Only search the left strip where avatars actually live
-    margin_px = int(w * left_margin_frac)
-    strip = gray[:, :margin_px]
-
-    circles = cv2.HoughCircles(
-        strip, cv2.HOUGH_GRADIENT, dp=1.2, minDist=int(h * 0.05),
-        param1=80, param2=25,
-        minRadius=int(w * 0.02), maxRadius=int(w * 0.05)
-    )
-
+    width, height = img_rgb.size
+    
+    detected_items = detect_pii_bounding_boxes(pil_img, api_key)
+    
     out = img_rgb.copy()
-    if circles is not None:
-        for (cx, cy, r) in circles[0]:
-            cx, cy, r = int(cx), int(cy), int(r)
-            pad = int(r * 0.2)
+    
+    for item in detected_items:
+        box = item.get("box_2d")
+        if not box or len(box) != 4:
+            continue
+            
+        ymin, xmin, ymax, xmax = box
+        
+        left = int((xmin / 1000.0) * width)
+        top = int((ymin / 1000.0) * height)
+        right = int((xmax / 1000.0) * width)
+        bottom = int((ymax / 1000.0) * height)
+        
+        left = max(0, left - 2)
+        top = max(0, top - 2)
+        right = min(width, right + 2)
+        bottom = min(height, bottom + 2)
 
-            # Blur the avatar circle itself
-            ax0, ay0 = max(cx - r - pad, 0), max(cy - r - pad, 0)
-            ax1, ay1 = min(cx + r + pad, margin_px), cy + r + pad
-            region = out.crop((ax0, ay0, ax1, ay1)).filter(ImageFilter.GaussianBlur(radius=14))
-            out.paste(region, (ax0, ay0))
-
-            # Blur the username strip beside it
-            name_x0 = cx + r
-            name_x1 = min(name_x0 + name_width, w)
-            name_y0 = max(cy - r, 0)
-            name_y1 = cy + r
-            if name_x1 > name_x0:
-                name_region = out.crop((name_x0, name_y0, name_x1, name_y1)).filter(ImageFilter.GaussianBlur(radius=14))
-                out.paste(name_region, (name_x0, name_y0))
-
+        if right > left and bottom > top:
+            region = out.crop((left, top, right, bottom)).filter(ImageFilter.GaussianBlur(radius=16))
+            out.paste(region, (left, top))
+            
     return out
 
 
@@ -225,19 +240,17 @@ def jalankan_otomatisasi_midweek(creds, news_items, week_range, progress_bar, st
         try:
             status_box.info(f"[{index+1}/{jumlah}] Memproses Midweek: {main_file.name}...")
 
+            # AI detects PII bounding boxes & blurs them automatically
             main_file.seek(0)
-            
-            # Apply blur to main image
             main_pil = Image.open(main_file)
-            gambar_blur_main = blur_avatars_and_names(main_pil)
+            gambar_blur_main = blur_pii_with_ai(main_pil, GEMINI_API_KEY)
             gambar_list = [gambar_blur_main]
             
             gambar_blur_comment = None
             if comment_file:
                 comment_file.seek(0)
-                # Apply blur to comment image
                 comment_pil = Image.open(comment_file)
-                gambar_blur_comment = blur_avatars_and_names(comment_pil)
+                gambar_blur_comment = blur_pii_with_ai(comment_pil, GEMINI_API_KEY)
                 gambar_list.append(gambar_blur_comment)
 
             prompt_ai = """
@@ -275,7 +288,6 @@ def jalankan_otomatisasi_midweek(creds, news_items, week_range, progress_bar, st
 
             sheets_append_data.append([week_range, judul, konteks])
 
-            # Upload the BLURRED images to drive
             link_gambar_main = upload_gambar_ke_drive(drive_service, main_file, blurred_pil_img=gambar_blur_main)
             link_gambar_comment = upload_gambar_ke_drive(drive_service, comment_file, blurred_pil_img=gambar_blur_comment) if comment_file else None
 
@@ -444,7 +456,7 @@ def get_creds():
 
 # ============== UI ==============
 st.title("📊 GNS Slide Automation (Midweek & Endweek)")
-st.caption("Upload gambar → AI Generates Midweek → Pilih Kategori → Auto Generate Endweek.")
+st.caption("Upload gambar → AI Generates Midweek & Blurs PII → Pilih Kategori → Auto Generate Endweek.")
 
 try:
     creds = get_creds()
@@ -478,7 +490,7 @@ if news_items and st.button("🚀 1. Jalankan Midweek", type="primary"):
     else:
         progress_bar = st.progress(0)
         status_box = st.empty()
-        with st.spinner("Memproses Midweek (AI Analysis, Redaction) & Ekstrak Spreadsheet..."):
+        with st.spinner("Memproses Midweek (AI Detection & Redaction) & Ekstrak Spreadsheet..."):
             try:
                 link_midweek, data_tersimpan = jalankan_otomatisasi_midweek(creds, news_items, week_range_input, progress_bar, status_box)
                 st.session_state.processed_data = data_tersimpan
