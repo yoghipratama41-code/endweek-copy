@@ -2,7 +2,6 @@ import time
 import random
 import re
 import io
-import json
 
 import streamlit as st
 import google.generativeai as genai
@@ -10,7 +9,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request as GoogleAuthRequest
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image
 
 # ============== KONFIGURASI ==============
 st.set_page_config(page_title="GNS Slide Automation", page_icon="📊", layout="centered")
@@ -47,61 +46,6 @@ MODEL_PRIORITY = [
 ]
 
 MAX_RETRY_PER_MODEL = 3
-
-
-# ============== HELPER: CENSOR ==============
-def apply_censor(image_file, boxes):
-    """
-    Blur + darken bounding boxes on an image.
-    image_file: file-like object (Streamlit UploadedFile or BytesIO)
-    boxes: list of {"type": "...", "bbox": [x1, y1, x2, y2]}
-    Returns: BytesIO containing censored JPEG
-    """
-    image_file.seek(0)
-    img = Image.open(image_file).convert("RGBA")
-    if not boxes:
-        output = io.BytesIO()
-        img.convert("RGB").save(output, format="JPEG", quality=90)
-        output.seek(0)
-        return output
-
-    width, height = img.size
-    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
-
-    for box in boxes:
-        try:
-            x1, y1, x2, y2 = map(int, box["bbox"])
-            x1, y1 = max(0, x1), max(0, y1)
-            x2, y2 = min(width, x2), min(height, y2)
-            if x2 > x1 and y2 > y1:
-                region = img.crop((x1, y1, x2, y2))
-                blurred = region.filter(ImageFilter.GaussianBlur(radius=20))
-                img.paste(blurred, (x1, y1))
-                draw.rectangle([x1, y1, x2, y2], fill=(0, 0, 0, 120))
-        except Exception:
-            continue
-
-    img = Image.alpha_composite(img, overlay).convert("RGB")
-    output = io.BytesIO()
-    img.save(output, format="JPEG", quality=90)
-    output.seek(0)
-    return output
-
-
-def parse_censor_boxes(teks_raw):
-    """Extract censor bounding boxes from Gemini response."""
-    try:
-        match = re.search(r'\[CENSOR\]\s*(.*?)\s*\[/CENSOR\]', teks_raw, re.DOTALL)
-        if not match:
-            return [], []
-        json_str = match.group(1).strip()
-        json_str = re.sub(r'^```json\s*', '', json_str)
-        json_str = re.sub(r'\s*```$', '', json_str)
-        data = json.loads(json_str)
-        return data.get("main_image", []), data.get("comment_image", [])
-    except Exception:
-        return [], []
 
 
 # ============== HELPER: MODEL FALLBACK & AI ==============
@@ -181,12 +125,12 @@ def cari_template_slide_endweek(presentation):
 
 
 # ============== HELPER: UPLOAD IMAGE KE DRIVE ==============
-def upload_gambar_ke_drive(drive_service, file_obj, file_name=None):
-    file_obj.seek(0)
-    actual_name = file_name or getattr(file_obj, 'name', 'image.jpg')
-    media = MediaIoBaseUpload(io.BytesIO(file_obj.read()), mimetype="image/jpeg")
+# (DIKEMBALIKAN KE KODE ASLI)
+def upload_gambar_ke_drive(drive_service, uploaded_file):
+    uploaded_file.seek(0)
+    media = MediaIoBaseUpload(io.BytesIO(uploaded_file.read()), mimetype="image/jpeg")
     file_dr = drive_service.files().create(
-        body={"name": actual_name}, media_body=media, fields="id, webContentLink"
+        body={"name": uploaded_file.name}, media_body=media, fields="id, webContentLink"
     ).execute()
     drive_service.permissions().create(
         fileId=file_dr["id"], body={"type": "anyone", "role": "reader"}
@@ -195,14 +139,16 @@ def upload_gambar_ke_drive(drive_service, file_obj, file_name=None):
 
 
 # ============== AUTOMATION 1: MIDWEEK (AI GENERATION) ==============
-def jalankan_otomatisasi_midweek(creds, news_items, week_range, progress_bar, status_box, enable_censor=True):
+# FITUR TAMBAHAN: parameter week_range
+def jalankan_otomatisasi_midweek(creds, news_items, week_range, progress_bar, status_box):
     drive_service = build("drive", "v3", credentials=creds)
     slides_service = build("slides", "v1", credentials=creds)
-    sheets_service = build("sheets", "v4", credentials=creds)
+    # FITUR TAMBAHAN: build service untuk sheets
+    sheets_service = build("sheets", "v4", credentials=creds) 
     genai.configure(api_key=GEMINI_API_KEY)
 
     model_fallback_list = get_model_fallback_list()
-
+    
     nama_slide_baru = f"Final Midweek - {time.strftime('%Y-%m-%d %H:%M:%S')}"
     copy = drive_service.files().copy(
         fileId=TEMPLATE_PRESENTATION_ID, body={"name": nama_slide_baru}
@@ -215,8 +161,10 @@ def jalankan_otomatisasi_midweek(creds, news_items, week_range, progress_bar, st
 
     slide_count = len(presentation.get("slides", []))
     jumlah = len(news_items)
-
-    processed_data = []
+    
+    processed_data = [] 
+    
+    # FITUR TAMBAHAN: List untuk menyimpan data untuk spreadsheet
     sheets_append_data = []
 
     for index, item in enumerate(news_items):
@@ -226,7 +174,6 @@ def jalankan_otomatisasi_midweek(creds, news_items, week_range, progress_bar, st
         try:
             status_box.info(f"[{index+1}/{jumlah}] Memproses Midweek: {main_file.name}...")
 
-            # --- AI ANALYSIS (menggunakan gambar asli) ---
             main_file.seek(0)
             gambar_list = [Image.open(main_file)]
             if comment_file:
@@ -237,8 +184,6 @@ def jalankan_otomatisasi_midweek(creds, news_items, week_range, progress_bar, st
             Analyze this image (and comments if any) for a professional research slide.
             Write the analysis in one single cohesive paragraph in English.
 
-            The FIRST image provided is the MAIN POST. The SECOND image (if provided) is the COMMENT THREAD.
-
             Strict Rules:
             1. Refer to both users and drivers ONLY as "rider".
             2. Do NOT mention any social media usernames, account names, or the image filename.
@@ -246,51 +191,17 @@ def jalankan_otomatisasi_midweek(creds, news_items, week_range, progress_bar, st
             4. Never begin the paragraph with a generic opener such as "This image...", "This discussion...", "The illustration...", "This conversation...", or any variant that refers to "the image" or "the illustration" itself. Do not describe the fact that you are looking at an image at all. Instead, dive straight into the substance: open with the rider's situation, the specific complaint or sentiment, the operational issue, a concrete detail, or the context of the exchange. Vary the opening construction from one slide to the next (e.g. start with a cause, a location, a time reference, a rider's action, or a direct statement of the issue) so that consecutive outputs do not read as templated or repetitive.
             5. The paragraph must consist of at least 3-4 sentences.
 
-            Additionally, identify ALL profile pictures (circular avatars) and account names/usernames visible in ANY of the provided images. Return bounding boxes for each image separately.
-
             Output Format:
             [TITLE] Write a long, specific, headline-style title, roughly 12-20 words, that reads like a mini research-slide headline capturing the core theme plus a specific supporting detail (not a short generic label). For reference, match this style and length:
             "Cross-Region Operational Challenges: Detailed Suggestion from Community Regarding Working on a Different Zone Registered"
             [CONTENT] Write the full paragraph here.
-            [CENSOR]
-            {
-              "main_image": [
-                {"type": "profile_pic", "bbox": [x1, y1, x2, y2]},
-                {"type": "name", "bbox": [x1, y1, x2, y2]}
-              ],
-              "comment_image": [
-                {"type": "profile_pic", "bbox": [x1, y1, x2, y2]},
-                {"type": "name", "bbox": [x1, y1, x2, y2]}
-              ]
-            }
-            [/CENSOR]
-
-            Rules for [CENSOR]:
-            - Coordinates are in pixels [left, top, right, bottom] relative to each original image
-            - If no comment image is provided, return an empty array for "comment_image"
-            - Include every visible profile picture and username (main post author + all commenters)
-            - Be tight and accurate around each element
             """
 
             teks_raw, model_dipakai = analisis_dengan_model_fallback(
                 model_fallback_list, prompt_ai, gambar_list, status_box
             )
-
-            # Parse title & content (handle new [CENSOR] section)
-            try:
-                judul = teks_raw.split("[TITLE]")[1].split("[CONTENT]")[0].strip()
-            except IndexError:
-                judul = "Untitled"
-
-            try:
-                content_section = teks_raw.split("[CONTENT]")[1]
-                if "[CENSOR]" in content_section:
-                    full_para = content_section.split("[CENSOR]")[0].strip()
-                else:
-                    full_para = content_section.strip()
-            except IndexError:
-                full_para = teks_raw.strip()
-
+            judul = teks_raw.split("[TITLE]")[1].split("[CONTENT]")[0].strip()
+            full_para = teks_raw.split("[CONTENT]")[1].strip()
             sentences = re.split(r"(?<=[.!?]) +", full_para)
 
             if len(sentences) > 1:
@@ -302,30 +213,12 @@ def jalankan_otomatisasi_midweek(creds, news_items, week_range, progress_bar, st
                 insight_list = []
                 insight_midweek = "-"
 
-            # --- CENSORING PHASE ---
-            main_censored = main_file
-            comment_censored = comment_file
-
-            if enable_censor:
-                status_box.info(f"[{index+1}/{jumlah}] Censoring: {main_file.name}...")
-                main_boxes, comment_boxes = parse_censor_boxes(teks_raw)
-                main_censored = apply_censor(main_file, main_boxes)
-                if comment_file:
-                    comment_censored = apply_censor(comment_file, comment_boxes)
-
-            # --- SPREADSHEET DATA ---
+            # FITUR TAMBAHAN: Extract untuk spreadsheet (WeekRange, Title, Body)
             sheets_append_data.append([week_range, judul, konteks])
 
-            # --- UPLOAD CENSORED IMAGES ---
-            main_censored.seek(0)
-            link_gambar_main = upload_gambar_ke_drive(drive_service, main_censored, main_file.name)
+            link_gambar_main = upload_gambar_ke_drive(drive_service, main_file)
+            link_gambar_comment = upload_gambar_ke_drive(drive_service, comment_file) if comment_file else None
 
-            link_gambar_comment = None
-            if comment_file and comment_censored:
-                comment_censored.seek(0)
-                link_gambar_comment = upload_gambar_ke_drive(drive_service, comment_censored, comment_file.name)
-
-            # --- STORE FOR ENDWEEK ---
             processed_data.append({
                 "filename": main_file.name,
                 "title": judul,
@@ -335,7 +228,6 @@ def jalankan_otomatisasi_midweek(creds, news_items, week_range, progress_bar, st
                 "img_cmt": link_gambar_comment
             })
 
-            # --- BUILD MAIN SLIDE ---
             res_dup = slides_service.presentations().batchUpdate(
                 presentationId=id_slide_baru,
                 body={"requests": [{"duplicateObject": {"objectId": id_templat_main}}]},
@@ -352,7 +244,6 @@ def jalankan_otomatisasi_midweek(creds, news_items, week_range, progress_bar, st
             slides_service.presentations().batchUpdate(presentationId=id_slide_baru, body={"requests": req_main}).execute()
             slide_count += 1
 
-            # --- BUILD COMMENT SLIDE (jika ada) ---
             if comment_file:
                 res_dup_c = slides_service.presentations().batchUpdate(
                     presentationId=id_slide_baru,
@@ -377,7 +268,7 @@ def jalankan_otomatisasi_midweek(creds, news_items, week_range, progress_bar, st
         finally:
             progress_bar.progress((index + 1) / jumlah)
 
-    # --- KIRIM DATA KE SPREADSHEET ---
+    # FITUR TAMBAHAN: Kirim data ke Spreadsheet sekaligus di akhir proses
     if sheets_append_data:
         try:
             status_box.info("Mengirim data (Title & Kalimat Pertama) ke Spreadsheet...")
@@ -418,14 +309,14 @@ def jalankan_otomatisasi_endweek(creds, processed_data, selections, status_box):
     for item in processed_data:
         fname = item["filename"]
         format_pilihan = selections[fname]
-
+        
         status_box.info(f"Memproses Endweek: {fname} sebagai {format_pilihan}...")
 
         judul = item["title"]
         konteks = item["context"]
         img_main = item["img_main"]
         img_cmt = item["img_cmt"]
-
+        
         insight_endweek = " ".join(item["insight_list"])
 
         if "Format 1" in format_pilihan:
@@ -511,6 +402,7 @@ st.divider()
 
 # ------------- TAHAP 1: UPLOAD & MIDWEEK -------------
 st.subheader("1️⃣ Upload Gambar & Setup Data")
+# FITUR TAMBAHAN: Form input bebas untuk tanggal (sebagai teks)
 week_range_input = st.text_input("Masukkan Tanggal / Week Range (Bebas ketik):", value="")
 
 main_files = st.file_uploader("Upload gambar utama", type=["jpg", "jpeg", "png"], accept_multiple_files=True, key="main_uploader")
@@ -522,9 +414,8 @@ if main_files:
     for mf in main_files:
         news_items.append({"main": mf, "comment": comment_by_name.get(mf.name)})
 
-enable_censor = st.checkbox("🔒 Aktifkan Censor (blur foto profil & nama akun)", value=True)
-
 if news_items and st.button("🚀 1. Jalankan Midweek", type="primary"):
+    # Memaksa user mengisi week_range dulu
     if not week_range_input.strip():
         st.warning("⚠️ Harap isi 'Tanggal / Week Range' terlebih dahulu sebelum menjalankan.")
     else:
@@ -532,9 +423,7 @@ if news_items and st.button("🚀 1. Jalankan Midweek", type="primary"):
         status_box = st.empty()
         with st.spinner("Memproses Midweek (AI Analysis) & Ekstrak Spreadsheet..."):
             try:
-                link_midweek, data_tersimpan = jalankan_otomatisasi_midweek(
-                    creds, news_items, week_range_input, progress_bar, status_box, enable_censor
-                )
+                link_midweek, data_tersimpan = jalankan_otomatisasi_midweek(creds, news_items, week_range_input, progress_bar, status_box)
                 st.session_state.processed_data = data_tersimpan
                 st.session_state.midweek_link = link_midweek
                 st.session_state.midweek_done = True
@@ -546,7 +435,7 @@ if news_items and st.button("🚀 1. Jalankan Midweek", type="primary"):
 if st.session_state.midweek_done and len(st.session_state.processed_data) > 0:
     st.divider()
     st.markdown(f"✅ **[Buka Presentasi Midweek di sini]({st.session_state.midweek_link})**")
-
+    
     st.subheader("2️⃣ Kategori Slide untuk Endweek")
     st.info("Pilih format presentasi untuk masing-masing slide di laporan Endweek. AI tidak akan dijalankan ulang, melainkan menggunakan hasil Midweek (Insight akan digabung menjadi 1 paragraf).")
 
