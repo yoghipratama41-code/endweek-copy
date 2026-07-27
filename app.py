@@ -9,7 +9,9 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request as GoogleAuthRequest
-from PIL import Image
+from PIL import Image, ImageFilter
+import cv2
+import numpy as np
 
 # ============== KONFIGURASI ==============
 st.set_page_config(page_title="GNS Slide Automation", page_icon="📊", layout="centered")
@@ -124,11 +126,64 @@ def cari_template_slide_endweek(presentation):
     return id_fb_main, id_fb_comment, id_promo_main
 
 
+# ============== HELPER: AUTO BLUR AVATAR & NAME ==============
+def blur_avatars_and_names(pil_img: Image.Image, left_margin_frac: float = 0.12, name_width: int = 260) -> Image.Image:
+    """
+    Detects circular avatars sitting in the left margin of a comment
+    screenshot and blurs each avatar plus the username text beside it.
+    """
+    img_rgb = pil_img.convert("RGB")
+    w, h = img_rgb.size
+    cv_img = cv2.cvtColor(np.array(img_rgb), cv2.COLOR_RGB2BGR)
+    gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
+    gray = cv2.medianBlur(gray, 5)
+
+    # Only search the left strip where avatars actually live
+    margin_px = int(w * left_margin_frac)
+    strip = gray[:, :margin_px]
+
+    circles = cv2.HoughCircles(
+        strip, cv2.HOUGH_GRADIENT, dp=1.2, minDist=int(h * 0.05),
+        param1=80, param2=25,
+        minRadius=int(w * 0.02), maxRadius=int(w * 0.05)
+    )
+
+    out = img_rgb.copy()
+    if circles is not None:
+        for (cx, cy, r) in circles[0]:
+            cx, cy, r = int(cx), int(cy), int(r)
+            pad = int(r * 0.2)
+
+            # Blur the avatar circle itself
+            ax0, ay0 = max(cx - r - pad, 0), max(cy - r - pad, 0)
+            ax1, ay1 = min(cx + r + pad, margin_px), cy + r + pad
+            region = out.crop((ax0, ay0, ax1, ay1)).filter(ImageFilter.GaussianBlur(radius=14))
+            out.paste(region, (ax0, ay0))
+
+            # Blur the username strip beside it
+            name_x0 = cx + r
+            name_x1 = min(name_x0 + name_width, w)
+            name_y0 = max(cy - r, 0)
+            name_y1 = cy + r
+            if name_x1 > name_x0:
+                name_region = out.crop((name_x0, name_y0, name_x1, name_y1)).filter(ImageFilter.GaussianBlur(radius=14))
+                out.paste(name_region, (name_x0, name_y0))
+
+    return out
+
+
 # ============== HELPER: UPLOAD IMAGE KE DRIVE ==============
-# (DIKEMBALIKAN KE KODE ASLI)
-def upload_gambar_ke_drive(drive_service, uploaded_file):
-    uploaded_file.seek(0)
-    media = MediaIoBaseUpload(io.BytesIO(uploaded_file.read()), mimetype="image/jpeg")
+def upload_gambar_ke_drive(drive_service, uploaded_file, blurred_pil_img=None):
+    if blurred_pil_img is not None:
+        buf = io.BytesIO()
+        blurred_pil_img = blurred_pil_img.convert("RGB")
+        blurred_pil_img.save(buf, format="JPEG")
+        buf.seek(0)
+        media = MediaIoBaseUpload(buf, mimetype="image/jpeg")
+    else:
+        uploaded_file.seek(0)
+        media = MediaIoBaseUpload(io.BytesIO(uploaded_file.read()), mimetype="image/jpeg")
+        
     file_dr = drive_service.files().create(
         body={"name": uploaded_file.name}, media_body=media, fields="id, webContentLink"
     ).execute()
@@ -139,11 +194,9 @@ def upload_gambar_ke_drive(drive_service, uploaded_file):
 
 
 # ============== AUTOMATION 1: MIDWEEK (AI GENERATION) ==============
-# FITUR TAMBAHAN: parameter week_range
 def jalankan_otomatisasi_midweek(creds, news_items, week_range, progress_bar, status_box):
     drive_service = build("drive", "v3", credentials=creds)
     slides_service = build("slides", "v1", credentials=creds)
-    # FITUR TAMBAHAN: build service untuk sheets
     sheets_service = build("sheets", "v4", credentials=creds) 
     genai.configure(api_key=GEMINI_API_KEY)
 
@@ -163,8 +216,6 @@ def jalankan_otomatisasi_midweek(creds, news_items, week_range, progress_bar, st
     jumlah = len(news_items)
     
     processed_data = [] 
-    
-    # FITUR TAMBAHAN: List untuk menyimpan data untuk spreadsheet
     sheets_append_data = []
 
     for index, item in enumerate(news_items):
@@ -175,10 +226,19 @@ def jalankan_otomatisasi_midweek(creds, news_items, week_range, progress_bar, st
             status_box.info(f"[{index+1}/{jumlah}] Memproses Midweek: {main_file.name}...")
 
             main_file.seek(0)
-            gambar_list = [Image.open(main_file)]
+            
+            # Apply blur to main image
+            main_pil = Image.open(main_file)
+            gambar_blur_main = blur_avatars_and_names(main_pil)
+            gambar_list = [gambar_blur_main]
+            
+            gambar_blur_comment = None
             if comment_file:
                 comment_file.seek(0)
-                gambar_list.append(Image.open(comment_file))
+                # Apply blur to comment image
+                comment_pil = Image.open(comment_file)
+                gambar_blur_comment = blur_avatars_and_names(comment_pil)
+                gambar_list.append(gambar_blur_comment)
 
             prompt_ai = """
             Analyze this image (and comments if any) for a professional research slide.
@@ -213,11 +273,11 @@ def jalankan_otomatisasi_midweek(creds, news_items, week_range, progress_bar, st
                 insight_list = []
                 insight_midweek = "-"
 
-            # FITUR TAMBAHAN: Extract untuk spreadsheet (WeekRange, Title, Body)
             sheets_append_data.append([week_range, judul, konteks])
 
-            link_gambar_main = upload_gambar_ke_drive(drive_service, main_file)
-            link_gambar_comment = upload_gambar_ke_drive(drive_service, comment_file) if comment_file else None
+            # Upload the BLURRED images to drive
+            link_gambar_main = upload_gambar_ke_drive(drive_service, main_file, blurred_pil_img=gambar_blur_main)
+            link_gambar_comment = upload_gambar_ke_drive(drive_service, comment_file, blurred_pil_img=gambar_blur_comment) if comment_file else None
 
             processed_data.append({
                 "filename": main_file.name,
@@ -268,7 +328,6 @@ def jalankan_otomatisasi_midweek(creds, news_items, week_range, progress_bar, st
         finally:
             progress_bar.progress((index + 1) / jumlah)
 
-    # FITUR TAMBAHAN: Kirim data ke Spreadsheet sekaligus di akhir proses
     if sheets_append_data:
         try:
             status_box.info("Mengirim data (Title & Kalimat Pertama) ke Spreadsheet...")
@@ -402,7 +461,6 @@ st.divider()
 
 # ------------- TAHAP 1: UPLOAD & MIDWEEK -------------
 st.subheader("1️⃣ Upload Gambar & Setup Data")
-# FITUR TAMBAHAN: Form input bebas untuk tanggal (sebagai teks)
 week_range_input = st.text_input("Masukkan Tanggal / Week Range (Bebas ketik):", value="")
 
 main_files = st.file_uploader("Upload gambar utama", type=["jpg", "jpeg", "png"], accept_multiple_files=True, key="main_uploader")
@@ -415,13 +473,12 @@ if main_files:
         news_items.append({"main": mf, "comment": comment_by_name.get(mf.name)})
 
 if news_items and st.button("🚀 1. Jalankan Midweek", type="primary"):
-    # Memaksa user mengisi week_range dulu
     if not week_range_input.strip():
         st.warning("⚠️ Harap isi 'Tanggal / Week Range' terlebih dahulu sebelum menjalankan.")
     else:
         progress_bar = st.progress(0)
         status_box = st.empty()
-        with st.spinner("Memproses Midweek (AI Analysis) & Ekstrak Spreadsheet..."):
+        with st.spinner("Memproses Midweek (AI Analysis, Redaction) & Ekstrak Spreadsheet..."):
             try:
                 link_midweek, data_tersimpan = jalankan_otomatisasi_midweek(creds, news_items, week_range_input, progress_bar, status_box)
                 st.session_state.processed_data = data_tersimpan
