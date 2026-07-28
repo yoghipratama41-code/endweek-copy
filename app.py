@@ -192,7 +192,7 @@ def jalankan_otomatisasi_midweek(creds, news_items, week_range, progress_bar, st
             5. The paragraph must consist of at least 3-4 sentences.
 
             Output Format:
-            [TITLE] Write a long, specific, headline-style title, roughly 12-20 words, that reads like a mini research-slide headline capturing the core theme plus a specific supporting detail (not a short generic label). For reference, match this style and length:
+            [TITLE] Write a long, specific, headline-style title, roughly 12-18 words, that reads like a mini research-slide headline capturing the core theme plus a specific supporting detail (not a short generic label). For reference, match this style and length:
             "Cross-Region Operational Challenges: Detailed Suggestion from Community Regarding Working on a Different Zone Registered"
             [CONTENT] Write the full paragraph here.
             """
